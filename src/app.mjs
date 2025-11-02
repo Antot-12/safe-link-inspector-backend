@@ -7,6 +7,7 @@ import { mkdir, writeFile, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { nanoid } from "nanoid"
 import got from "got"
+import { parse as parseDomain } from "tldts"
 import { addRecord, getAll, getById, removeById, clearAll } from "./store/db.js"
 import { unshortenUrl, normalizeUrl } from "./analyzer/unshorten.js"
 import { riskScore, riskLabel, computeHeuristics } from "./analyzer/risk.js"
@@ -14,7 +15,7 @@ import { vtCheck } from "./analyzer/vt.js"
 import { sanitizeHtml } from "./analyzer/sanitize.js"
 import { getTlsProfile } from "./analyzer/tls.js"
 import { getWhoisAge } from "./analyzer/whois.js"
-import { safeBrowsingCheck, phishTankCheck, urlscanCheck } from "./analyzer/reputation.js"
+import { safeBrowsingCheck, phishTankCheck, urlscanCheck, urlhausCheck, threatFoxCheck, openPhishCheck, spamhausDblCheck } from "./analyzer/reputation.js"
 import { getIpInfo } from "./analyzer/netinfo.js"
 import { analyzeForms } from "./analyzer/forms.js"
 import { securityHeadersProfile, parseSetCookie } from "./analyzer/headers.js"
@@ -45,12 +46,6 @@ function isHttpUrl(u){
     const x = new URL(u)
     return x.protocol === "http:" || x.protocol === "https:"
   }catch{ return false }
-}
-
-function parseUrlParam(req){
-  const q = req.query?.url
-  const s = Array.isArray(q) ? q[0] : q
-  return typeof s === "string" ? s.trim() : ""
 }
 
 function stripMetaCsp(html){
@@ -118,7 +113,6 @@ async function fetchUpstream(url, extraHeaders = {}){
 
 export async function createApp(){
   const app = express()
-  const PORT = process.env.PORT || 4000
   const CACHE_TTL_MIN = Number(process.env.CACHE_TTL_MIN || 15)
 
   app.disable("x-powered-by")
@@ -132,11 +126,14 @@ export async function createApp(){
       "https://antot-12.github.io"
     ])
   }))
+
   app.use(helmet({
+    contentSecurityPolicy: false,
+    frameguard: false,
     crossOriginOpenerPolicy: { policy: "same-origin" },
-    crossOriginResourcePolicy: { policy: "same-site" },
-    contentSecurityPolicy: false
+    crossOriginResourcePolicy: { policy: "same-site" }
   }))
+
   app.use(compression())
   app.use(morgan("tiny"))
 
@@ -258,12 +255,21 @@ export async function createApp(){
 
     const heur = computeHeuristics(finalUrl)
     const base = riskScore(finalUrl)
-    const score = base + heur.scoreDelta
+    const score = Math.max(0, Math.min(100, base + heur.scoreDelta))
     const label = riskLabel(score)
 
-    const [vt, tls, whois, ipinfo, gsb, pt, urlscan] = await Promise.all([
-      vtCheck(finalUrl), getTlsProfile(finalUrl), getWhoisAge(finalUrl),
-      getIpInfo(finalUrl), safeBrowsingCheck(finalUrl), phishTankCheck(finalUrl), urlscanCheck(finalUrl)
+    const [vt, tls, whois, ipinfo, gsb, pt, urlscan, urlhaus, tfox, openphish, dbl] = await Promise.all([
+      vtCheck(finalUrl),
+      getTlsProfile(finalUrl),
+      getWhoisAge(finalUrl),
+      getIpInfo(finalUrl),
+      safeBrowsingCheck(finalUrl),
+      phishTankCheck(finalUrl),
+      urlscanCheck(finalUrl),
+      urlhausCheck(finalUrl),
+      threatFoxCheck(new URL(finalUrl).hostname),
+      openPhishCheck(finalUrl),
+      spamhausDblCheck(new URL(finalUrl).hostname)
     ])
 
     let title = "", description = "", contentType = "", sanitizedPath = "", formFindings = [], headersProfile = null, cookies = []
@@ -317,7 +323,7 @@ export async function createApp(){
       risk: { score, label }, heuristics: heur,
       vt, tls, tlsWarnings, whois, net: ipinfo,
       security: { hsts, httpToHttps, headers: headersProfile, cookies },
-      reputation: { gsb, phishTank: pt, urlscan },
+      reputation: { gsb, phishTank: pt, urlscan, urlhaus, threatFox: tfox, openPhish: openphish, spamhaus: dbl },
       contentType, title, description, formFindings,
       sanitized: sanitizedPath ? `/api/sanitized/${id}` : ""
     }
@@ -330,6 +336,7 @@ export async function createApp(){
     const file = join(SAFE_DIR, `${req.params.id}.html`)
     try{
       const html = await readFile(file)
+      res.removeHeader("X-Frame-Options")
       res.setHeader("Content-Type", "text/html; charset=utf-8")
       res.setHeader("Content-Security-Policy", [
         "default-src 'none'",
@@ -338,7 +345,7 @@ export async function createApp(){
         "font-src https: data:",
         "base-uri 'none'",
         "form-action 'none'",
-        "frame-ancestors 'self'"
+        `frame-ancestors ${allowedFramersHeader()}`
       ].join("; "))
       res.setHeader("X-Content-Type-Options","nosniff")
       res.setHeader("Cross-Origin-Resource-Policy","same-site")
@@ -349,55 +356,61 @@ export async function createApp(){
     }
   })
 
-  app.get(['/live', '/api/live'], async (req, res) => {
-  const raw = req.query.url
-  if (!raw) return res.status(400).send('url is required')
-  try {
-    const r = await fetchUpstream(raw)
-    const ct = r.headers['content-type'] || 'text/html; charset=utf-8'
-    res.setHeader('Content-Security-Policy', `default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; object-src 'none'; frame-ancestors ${allowedFramers()}`)
-    res.setHeader('Referrer-Policy','no-referrer')
-    res.setHeader('Permissions-Policy','geolocation=(), microphone=(), camera=(), payment=()')
-    res.setHeader('X-Content-Type-Options','nosniff')
-    res.setHeader('Cache-Control','no-store')
-    if (/text\/html/i.test(ct)) {
-      let html = r.body.toString()
-      html = stripMetaCsp(html)
-      html = insertBase(html, raw)
-      html = neutralizeFrameBusters(html)
-      html = rewriteAttrs(html, raw)
-      html = ensureStyles(html)
-      res.type('html').send(html)
-    } else {
-      res.setHeader('Content-Type', ct)
-      res.send(r.rawBody)
+  const liveHandler = async (req, res) => {
+    const raw = req.query.url
+    if (!raw) return res.status(400).send("url is required")
+    try {
+      const r = await fetchUpstream(raw)
+      const ct = r.headers["content-type"] || "text/html; charset=utf-8"
+      res.removeHeader("X-Frame-Options")
+      res.setHeader("Content-Security-Policy", `default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; object-src 'none'; frame-ancestors ${allowedFramersHeader()}`)
+      res.setHeader("Referrer-Policy","no-referrer")
+      res.setHeader("Permissions-Policy","geolocation=(), microphone=(), camera=(), payment=()")
+      res.setHeader("X-Content-Type-Options","nosniff")
+      res.setHeader("Cache-Control","no-store")
+      if (/text\/html/i.test(ct)) {
+        let html = r.body.toString()
+        html = stripMetaCsp(html)
+        html = insertBase(html, raw)
+        html = neutralizeFrameBusters(html)
+        html = rewriteAttrs(html, raw)
+        html = ensureStyles(html)
+        res.type("html").send(html)
+      } else {
+        if (ct) res.setHeader("Content-Type", ct)
+        res.send(r.rawBody)
+      }
+    } catch {
+      res.status(502).send("Bad gateway")
     }
-  } catch {
-    res.status(502).send('Bad gateway')
   }
-})
 
-app.get(['/asset', '/api/asset'], async (req, res) => {
-  const raw = req.query.url
-  if (!raw) return res.status(400).send('url is required')
-  try {
-    const origin = new URL(raw)
-    const r = await fetchUpstream(raw, { Referer: `${origin.origin}/` })
-    const ct = r.headers['content-type'] || ''
-    res.setHeader('Cache-Control','no-store')
-    if (/text\/css/i.test(ct)) {
-      let css = r.body.toString()
-      css = rewriteCssUrls(css, raw)
-      res.type('text/css').send(css)
-    } else {
-      if (ct) res.setHeader('Content-Type', ct)
-      res.send(r.rawBody)
+  const assetHandler = async (req, res) => {
+    const raw = req.query.url
+    if (!raw) return res.status(400).send("url is required")
+    try {
+      const origin = new URL(raw)
+      const r = await fetchUpstream(raw, { Referer: `${origin.origin}/` })
+      const ct = r.headers["content-type"] || ""
+      res.removeHeader("X-Frame-Options")
+      res.setHeader("Cache-Control","no-store")
+      if (/text\/css/i.test(ct)) {
+        let css = r.body.toString()
+        css = rewriteCssUrls(css, raw)
+        res.type("text/css").send(css)
+      } else {
+        if (ct) res.setHeader("Content-Type", ct)
+        res.send(r.rawBody)
+      }
+    } catch {
+      res.status(502).send("Bad gateway")
     }
-  } catch {
-    res.status(502).send('Bad gateway')
   }
-})
+
+  app.get("/live", liveHandler)
+  app.get("/api/live", liveHandler)
+  app.get("/asset", assetHandler)
+  app.get("/api/asset", assetHandler)
 
   return app
 }
-
