@@ -31,35 +31,40 @@ import { securityHeadersProfile, parseSetCookie } from "./analyzer/headers.js"
 function ua(){
   return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
 }
+
 function envList(name, fallback){
   const v = process.env[name]
   if (!v) return fallback
   return v.split(",").map(s=>s.trim()).filter(Boolean)
 }
+
 function allowedFramersHeader(){
   const list = envList("FRAME_ALLOWLIST", [
-    "https://antot-12.github.io",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
-    "https://safe-link-inspector.vercel.app"
+    "https://antot-12.github.io"
   ])
   return list.join(" ")
 }
+
 function isHttpUrl(u){
   try{
     const x = new URL(u)
     return x.protocol === "http:" || x.protocol === "https:"
   }catch{ return false }
 }
+
 function stripMetaCsp(html){
   return html.replace(/<meta[^>]+http-equiv=["']content-security-policy["'][^>]*>/ig, "")
 }
+
 function insertBase(html, baseHref){
   if (/<base\s/i.test(html)) return html
   return html.replace(/<head[^>]*>/i, m => `${m}\n<base href="${baseHref}">`)
 }
+
 function neutralizeFrameBusters(html){
   let out = html
   out = out.replace(/\btop\.location\b/gi, "window.location")
@@ -68,6 +73,7 @@ function neutralizeFrameBusters(html){
   out = out.replace(/\bwindow\.parent\b/gi, "window")
   return out
 }
+
 function rewriteAttrs(html, baseHref){
   const re = /(href|src|action)=("|\')([^"\']+)("|\')/gi
   return html.replace(re, (_m, attr, q, url, q2) => {
@@ -79,6 +85,7 @@ function rewriteAttrs(html, baseHref){
     return `${attr}=${q}/api/asset?url=${encodeURIComponent(abs)}${q2}`
   })
 }
+
 function rewriteCssUrls(css, baseHref){
   return css.replace(/url\((['"]?)(?!data:|https?:|blob:|#)([^'")]+)\1\)/gi, (_m, _q, u) => {
     let abs
@@ -87,11 +94,13 @@ function rewriteCssUrls(css, baseHref){
     return `url(/api/asset?url=${encodeURIComponent(abs)})`
   })
 }
+
 function ensureStyles(html){
   const inject = `<style>html,body{min-height:100%}img,video{max-width:100%}a{word-break:break-word;overflow-wrap:anywhere}</style>`
   if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${inject}</head>`)
   return inject + html
 }
+
 async function fetchUpstream(url, extraHeaders = {}){
   return got(url, {
     method: "GET",
@@ -112,24 +121,24 @@ async function fetchUpstream(url, extraHeaders = {}){
 
 export async function createApp(){
   const app = express()
+  const PORT = process.env.PORT || 4000
   const CACHE_TTL_MIN = Number(process.env.CACHE_TTL_MIN || 15)
+
   app.disable("x-powered-by")
   app.use(express.json({ limit: "2mb" }))
   app.use(cors({
     origin: envList("CORS_ALLOWLIST", [
-      "https://antot-12.github.io",
       "http://localhost:5173",
       "http://127.0.0.1:5173",
       "http://localhost:5174",
       "http://127.0.0.1:5174",
-      "https://safe-link-inspector.vercel.app"
+      "https://antot-12.github.io"
     ])
   }))
   app.use(helmet({
-    contentSecurityPolicy: false,
-    frameguard: false,
     crossOriginOpenerPolicy: { policy: "same-origin" },
-    crossOriginResourcePolicy: { policy: "same-site" }
+    crossOriginResourcePolicy: { policy: "same-site" },
+    contentSecurityPolicy: false
   }))
   app.use(compression())
   app.use(morgan("tiny"))
@@ -155,7 +164,8 @@ export async function createApp(){
         it.id, it.startedAt, it.risk?.score || "", it.risk?.label || "", it.inputUrl || "", it.finalUrl || "",
         it.title || "", it.description || "", it.contentType || "", it.sanitized || "",
         (it.chain||[]).join(" -> "), it.cacheHit ? "1" : "0"
-      ].map(qf).join(",")))
+      ].map(qf).join(","))
+    )
     res.setHeader("Content-Type","text/csv; charset=utf-8")
     res.setHeader("Content-Disposition","attachment; filename=history.csv")
     res.send(rows.join("\r\n"))
