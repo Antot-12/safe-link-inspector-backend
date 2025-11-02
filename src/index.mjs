@@ -15,7 +15,7 @@ import { vtCheck } from "./analyzer/vt.js";
 import { sanitizeHtml } from "./analyzer/sanitize.js";
 import { getTlsProfile } from "./analyzer/tls.js";
 import { getWhoisAge } from "./analyzer/whois.js";
-import { safeBrowsingCheck, phishTankCheck, urlscanCheck } from "./analyzer/reputation.js";
+import { safeBrowsingCheck,phishTankCheck,urlscanCheck,urlhausCheck,threatFoxCheck,openPhishCheck,spamhausDblCheck} from "./analyzer/reputation.js"
 import { getIpInfo } from "./analyzer/netinfo.js";
 import { analyzeForms } from "./analyzer/forms.js";
 import { securityHeadersProfile, parseSetCookie } from "./analyzer/headers.js";

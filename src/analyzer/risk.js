@@ -1,5 +1,5 @@
 import { parse as parseDomain } from 'tldts'
-import { toUnicode } from 'node:punycode'
+import { toUnicode } from "punycode"
 
 const TOKENS = [
   'login','signin','verify','update','secure','account','wallet','web3','bank','amazon','steam','apple',

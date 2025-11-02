@@ -14,7 +14,16 @@ import { vtCheck } from "./analyzer/vt.js"
 import { sanitizeHtml } from "./analyzer/sanitize.js"
 import { getTlsProfile } from "./analyzer/tls.js"
 import { getWhoisAge } from "./analyzer/whois.js"
-import { safeBrowsingCheck, phishTankCheck, urlscanCheck } from "./analyzer/reputation.js"
+import {
+  safeBrowsingCheck,
+  phishTankCheck,
+  urlscanCheck,
+  urlhausCheck,
+  threatFoxCheck,
+  openPhishCheck,
+  spamhausDblCheck,
+  summarizeReputation
+} from "./analyzer/reputation.js"
 import { getIpInfo } from "./analyzer/netinfo.js"
 import { analyzeForms } from "./analyzer/forms.js"
 import { securityHeadersProfile, parseSetCookie } from "./analyzer/headers.js"
@@ -22,46 +31,35 @@ import { securityHeadersProfile, parseSetCookie } from "./analyzer/headers.js"
 function ua(){
   return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
 }
-
 function envList(name, fallback){
   const v = process.env[name]
   if (!v) return fallback
   return v.split(",").map(s=>s.trim()).filter(Boolean)
 }
-
 function allowedFramersHeader(){
   const list = envList("FRAME_ALLOWLIST", [
+    "https://antot-12.github.io",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
-    "https://antot-12.github.io"
+    "https://safe-link-inspector.vercel.app"
   ])
   return list.join(" ")
 }
-
 function isHttpUrl(u){
   try{
     const x = new URL(u)
     return x.protocol === "http:" || x.protocol === "https:"
   }catch{ return false }
 }
-
-function parseUrlParam(req){
-  const q = req.query?.url
-  const s = Array.isArray(q) ? q[0] : q
-  return typeof s === "string" ? s.trim() : ""
-}
-
 function stripMetaCsp(html){
   return html.replace(/<meta[^>]+http-equiv=["']content-security-policy["'][^>]*>/ig, "")
 }
-
 function insertBase(html, baseHref){
   if (/<base\s/i.test(html)) return html
   return html.replace(/<head[^>]*>/i, m => `${m}\n<base href="${baseHref}">`)
 }
-
 function neutralizeFrameBusters(html){
   let out = html
   out = out.replace(/\btop\.location\b/gi, "window.location")
@@ -70,7 +68,6 @@ function neutralizeFrameBusters(html){
   out = out.replace(/\bwindow\.parent\b/gi, "window")
   return out
 }
-
 function rewriteAttrs(html, baseHref){
   const re = /(href|src|action)=("|\')([^"\']+)("|\')/gi
   return html.replace(re, (_m, attr, q, url, q2) => {
@@ -79,25 +76,22 @@ function rewriteAttrs(html, baseHref){
     let abs
     try { abs = new URL(u, baseHref).href } catch { abs = u }
     if (!isHttpUrl(abs)) return `${attr}=${q}${u}${q2}`
-    return `${attr}=${q}/asset?url=${encodeURIComponent(abs)}${q2}`
+    return `${attr}=${q}/api/asset?url=${encodeURIComponent(abs)}${q2}`
   })
 }
-
 function rewriteCssUrls(css, baseHref){
   return css.replace(/url\((['"]?)(?!data:|https?:|blob:|#)([^'")]+)\1\)/gi, (_m, _q, u) => {
     let abs
     try { abs = new URL(u, baseHref).href } catch { abs = u }
     if (!isHttpUrl(abs)) return `url(${u})`
-    return `url(/asset?url=${encodeURIComponent(abs)})`
+    return `url(/api/asset?url=${encodeURIComponent(abs)})`
   })
 }
-
 function ensureStyles(html){
   const inject = `<style>html,body{min-height:100%}img,video{max-width:100%}a{word-break:break-word;overflow-wrap:anywhere}</style>`
   if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${inject}</head>`)
   return inject + html
 }
-
 async function fetchUpstream(url, extraHeaders = {}){
   return got(url, {
     method: "GET",
@@ -118,24 +112,24 @@ async function fetchUpstream(url, extraHeaders = {}){
 
 export async function createApp(){
   const app = express()
-  const PORT = process.env.PORT || 4000
   const CACHE_TTL_MIN = Number(process.env.CACHE_TTL_MIN || 15)
-
   app.disable("x-powered-by")
   app.use(express.json({ limit: "2mb" }))
   app.use(cors({
     origin: envList("CORS_ALLOWLIST", [
+      "https://antot-12.github.io",
       "http://localhost:5173",
       "http://127.0.0.1:5173",
       "http://localhost:5174",
       "http://127.0.0.1:5174",
-      "https://antot-12.github.io"
+      "https://safe-link-inspector.vercel.app"
     ])
   }))
   app.use(helmet({
+    contentSecurityPolicy: false,
+    frameguard: false,
     crossOriginOpenerPolicy: { policy: "same-origin" },
-    crossOriginResourcePolicy: { policy: "same-site" },
-    contentSecurityPolicy: false
+    crossOriginResourcePolicy: { policy: "same-site" }
   }))
   app.use(compression())
   app.use(morgan("tiny"))
@@ -161,8 +155,7 @@ export async function createApp(){
         it.id, it.startedAt, it.risk?.score || "", it.risk?.label || "", it.inputUrl || "", it.finalUrl || "",
         it.title || "", it.description || "", it.contentType || "", it.sanitized || "",
         (it.chain||[]).join(" -> "), it.cacheHit ? "1" : "0"
-      ].map(qf).join(","))
-    )
+      ].map(qf).join(",")))
     res.setHeader("Content-Type","text/csv; charset=utf-8")
     res.setHeader("Content-Disposition","attachment; filename=history.csv")
     res.send(rows.join("\r\n"))
@@ -258,12 +251,21 @@ export async function createApp(){
 
     const heur = computeHeuristics(finalUrl)
     const base = riskScore(finalUrl)
-    const score = base + heur.scoreDelta
+    const score = Math.max(0, Math.min(100, base + heur.scoreDelta))
     const label = riskLabel(score)
 
-    const [vt, tls, whois, ipinfo, gsb, pt, urlscan] = await Promise.all([
-      vtCheck(finalUrl), getTlsProfile(finalUrl), getWhoisAge(finalUrl),
-      getIpInfo(finalUrl), safeBrowsingCheck(finalUrl), phishTankCheck(finalUrl), urlscanCheck(finalUrl)
+    const [vt, tls, whois, ipinfo, gsb, pt, urlscan, urlhaus, tfox, openphish, dbl] = await Promise.all([
+      vtCheck(finalUrl),
+      getTlsProfile(finalUrl),
+      getWhoisAge(finalUrl),
+      getIpInfo(finalUrl),
+      safeBrowsingCheck(finalUrl),
+      phishTankCheck(finalUrl),
+      urlscanCheck(finalUrl),
+      urlhausCheck(finalUrl),
+      threatFoxCheck(new URL(finalUrl).hostname),
+      openPhishCheck(finalUrl),
+      spamhausDblCheck(new URL(finalUrl).hostname)
     ])
 
     let title = "", description = "", contentType = "", sanitizedPath = "", formFindings = [], headersProfile = null, cookies = []
@@ -310,15 +312,37 @@ export async function createApp(){
     }
 
     const shareToken = nanoid(8)
+    const repSummary = summarizeReputation({
+      gsb,
+      phishTank: pt,
+      urlscan,
+      urlhaus,
+      threatFox: tfox,
+      openPhish: openphish,
+      spamhaus: dbl
+    })
 
     const record = {
-      id, shareToken, startedAt,
-      inputUrl: normalized, finalUrl, chain, isShortened,
-      risk: { score, label }, heuristics: heur,
-      vt, tls, tlsWarnings, whois, net: ipinfo,
+      id,
+      shareToken,
+      startedAt,
+      inputUrl: normalized,
+      finalUrl,
+      chain,
+      isShortened,
+      risk: { score, label },
+      heuristics: heur,
+      vt,
+      tls,
+      tlsWarnings,
+      whois,
+      net: ipinfo,
       security: { hsts, httpToHttps, headers: headersProfile, cookies },
-      reputation: { gsb, phishTank: pt, urlscan },
-      contentType, title, description, formFindings,
+      reputation: { gsb, phishTank: pt, urlscan, urlhaus, threatFox: tfox, openPhish: openphish, spamhaus: dbl, summary: repSummary },
+      contentType,
+      title,
+      description,
+      formFindings,
       sanitized: sanitizedPath ? `/api/sanitized/${id}` : ""
     }
 
@@ -338,7 +362,7 @@ export async function createApp(){
         "font-src https: data:",
         "base-uri 'none'",
         "form-action 'none'",
-        "frame-ancestors 'self'"
+        `frame-ancestors ${allowedFramersHeader()}`
       ].join("; "))
       res.setHeader("X-Content-Type-Options","nosniff")
       res.setHeader("Cross-Origin-Resource-Policy","same-site")
@@ -350,54 +374,53 @@ export async function createApp(){
   })
 
   app.get(['/live', '/api/live'], async (req, res) => {
-  const raw = req.query.url
-  if (!raw) return res.status(400).send('url is required')
-  try {
-    const r = await fetchUpstream(raw)
-    const ct = r.headers['content-type'] || 'text/html; charset=utf-8'
-    res.setHeader('Content-Security-Policy', `default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; object-src 'none'; frame-ancestors ${allowedFramers()}`)
-    res.setHeader('Referrer-Policy','no-referrer')
-    res.setHeader('Permissions-Policy','geolocation=(), microphone=(), camera=(), payment=()')
-    res.setHeader('X-Content-Type-Options','nosniff')
-    res.setHeader('Cache-Control','no-store')
-    if (/text\/html/i.test(ct)) {
-      let html = r.body.toString()
-      html = stripMetaCsp(html)
-      html = insertBase(html, raw)
-      html = neutralizeFrameBusters(html)
-      html = rewriteAttrs(html, raw)
-      html = ensureStyles(html)
-      res.type('html').send(html)
-    } else {
-      res.setHeader('Content-Type', ct)
-      res.send(r.rawBody)
+    const raw = req.query.url
+    if (!raw) return res.status(400).send('url is required')
+    try {
+      const r = await fetchUpstream(raw)
+      const ct = r.headers['content-type'] || 'text/html; charset=utf-8'
+      res.setHeader('Content-Security-Policy', `default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; object-src 'none'; frame-ancestors ${allowedFramersHeader()}`)
+      res.setHeader('Referrer-Policy','no-referrer')
+      res.setHeader('Permissions-Policy','geolocation=(), microphone=(), camera=(), payment=()')
+      res.setHeader('X-Content-Type-Options','nosniff')
+      res.setHeader('Cache-Control','no-store')
+      if (/text\/html/i.test(ct)) {
+        let html = r.body.toString()
+        html = stripMetaCsp(html)
+        html = insertBase(html, raw)
+        html = neutralizeFrameBusters(html)
+        html = rewriteAttrs(html, raw)
+        html = ensureStyles(html)
+        res.type('html').send(html)
+      } else {
+        res.setHeader('Content-Type', ct)
+        res.send(r.rawBody)
+      }
+    } catch {
+      res.status(502).send('Bad gateway')
     }
-  } catch {
-    res.status(502).send('Bad gateway')
-  }
-})
+  })
 
-app.get(['/asset', '/api/asset'], async (req, res) => {
-  const raw = req.query.url
-  if (!raw) return res.status(400).send('url is required')
-  try {
-    const origin = new URL(raw)
-    const r = await fetchUpstream(raw, { Referer: `${origin.origin}/` })
-    const ct = r.headers['content-type'] || ''
-    res.setHeader('Cache-Control','no-store')
-    if (/text\/css/i.test(ct)) {
-      let css = r.body.toString()
-      css = rewriteCssUrls(css, raw)
-      res.type('text/css').send(css)
-    } else {
-      if (ct) res.setHeader('Content-Type', ct)
-      res.send(r.rawBody)
+  app.get(['/asset', '/api/asset'], async (req, res) => {
+    const raw = req.query.url
+    if (!raw) return res.status(400).send('url is required')
+    try {
+      const origin = new URL(raw)
+      const r = await fetchUpstream(raw, { Referer: `${origin.origin}/` })
+      const ct = r.headers['content-type'] || ''
+      res.setHeader('Cache-Control','no-store')
+      if (/text\/css/i.test(ct)) {
+        let css = r.body.toString()
+        css = rewriteCssUrls(css, raw)
+        res.type('text/css').send(css)
+      } else {
+        if (ct) res.setHeader('Content-Type', ct)
+        res.send(r.rawBody)
+      }
+    } catch {
+      res.status(502).send('Bad gateway')
     }
-  } catch {
-    res.status(502).send('Bad gateway')
-  }
-})
+  })
 
   return app
 }
-
