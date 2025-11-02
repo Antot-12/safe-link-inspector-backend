@@ -113,6 +113,7 @@ async function fetchUpstream(url, extraHeaders = {}){
 export async function createApp(){
   const app = express()
   const CACHE_TTL_MIN = Number(process.env.CACHE_TTL_MIN || 15)
+
   app.disable("x-powered-by")
   app.use(express.json({ limit: "2mb" }))
   app.use(cors({
@@ -236,7 +237,6 @@ export async function createApp(){
     if (!input) return res.status(400).json({ error: "url is required" })
 
     const id = nanoid(10)
-    the 
     const startedAt = new Date().toISOString()
     const normalized = normalizeUrl(input)
     const unshort = await unshortenUrl(normalized)
@@ -347,7 +347,7 @@ export async function createApp(){
       sanitized: sanitizedPath ? `/api/sanitized/${id}` : ""
     }
 
-    await addRecord(record)
+    try { await addRecord(record) } catch {}
     res.json(record)
   })
 
@@ -421,6 +421,10 @@ export async function createApp(){
     } catch {
       res.status(502).send("Bad gateway")
     }
+  })
+
+  app.use((err, _req, res, _next) => {
+    res.status(500).json({ error: "server-error", message: String(err && err.message || err) })
   })
 
   return app
