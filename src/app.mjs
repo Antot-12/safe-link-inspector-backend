@@ -349,56 +349,55 @@ export async function createApp(){
     }
   })
 
-  app.get("/live", async (req, res) => {
-    const raw = parseUrlParam(req)
-    if (!raw) return res.status(400).send("url is required")
-    if (!isHttpUrl(raw)) return res.status(400).send("only http(s) allowed")
-    try{
-      const r = await fetchUpstream(raw)
-      const ct = r.headers["content-type"] || "text/html; charset=utf-8"
-      res.setHeader("Content-Security-Policy", `default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; object-src 'none'; frame-ancestors ${allowedFramersHeader()}`)
-      res.setHeader("Referrer-Policy","no-referrer")
-      res.setHeader("Permissions-Policy","geolocation=(), microphone=(), camera=(), payment=()")
-      res.setHeader("X-Content-Type-Options","nosniff")
-      res.setHeader("Cache-Control","no-store")
-      if (/text\/html/i.test(ct)){
-        let html = r.body.toString()
-        html = stripMetaCsp(html)
-        html = insertBase(html, raw)
-        html = neutralizeFrameBusters(html)
-        html = rewriteAttrs(html, raw)
-        html = ensureStyles(html)
-        res.type("html").send(html)
-      } else {
-        res.setHeader("Content-Type", ct)
-        res.send(r.rawBody)
-      }
-    }catch{
-      res.status(502).send("Bad gateway")
+  app.get(['/live', '/api/live'], async (req, res) => {
+  const raw = req.query.url
+  if (!raw) return res.status(400).send('url is required')
+  try {
+    const r = await fetchUpstream(raw)
+    const ct = r.headers['content-type'] || 'text/html; charset=utf-8'
+    res.setHeader('Content-Security-Policy', `default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; object-src 'none'; frame-ancestors ${allowedFramers()}`)
+    res.setHeader('Referrer-Policy','no-referrer')
+    res.setHeader('Permissions-Policy','geolocation=(), microphone=(), camera=(), payment=()')
+    res.setHeader('X-Content-Type-Options','nosniff')
+    res.setHeader('Cache-Control','no-store')
+    if (/text\/html/i.test(ct)) {
+      let html = r.body.toString()
+      html = stripMetaCsp(html)
+      html = insertBase(html, raw)
+      html = neutralizeFrameBusters(html)
+      html = rewriteAttrs(html, raw)
+      html = ensureStyles(html)
+      res.type('html').send(html)
+    } else {
+      res.setHeader('Content-Type', ct)
+      res.send(r.rawBody)
     }
-  })
+  } catch {
+    res.status(502).send('Bad gateway')
+  }
+})
 
-  app.get("/asset", async (req, res) => {
-    const raw = parseUrlParam(req)
-    if (!raw) return res.status(400).send("url is required")
-    if (!isHttpUrl(raw)) return res.status(400).send("only http(s) allowed")
-    try{
-      const origin = new URL(raw)
-      const r = await fetchUpstream(raw, { Referer: `${origin.origin}/` })
-      const ct = r.headers["content-type"] || ""
-      res.setHeader("Cache-Control","no-store")
-      if (/text\/css/i.test(ct)){
-        let css = r.body.toString()
-        css = rewriteCssUrls(css, raw)
-        res.type("text/css").send(css)
-      } else {
-        if (ct) res.setHeader("Content-Type", ct)
-        res.send(r.rawBody)
-      }
-    }catch{
-      res.status(502).send("Bad gateway")
+app.get(['/asset', '/api/asset'], async (req, res) => {
+  const raw = req.query.url
+  if (!raw) return res.status(400).send('url is required')
+  try {
+    const origin = new URL(raw)
+    const r = await fetchUpstream(raw, { Referer: `${origin.origin}/` })
+    const ct = r.headers['content-type'] || ''
+    res.setHeader('Cache-Control','no-store')
+    if (/text\/css/i.test(ct)) {
+      let css = r.body.toString()
+      css = rewriteCssUrls(css, raw)
+      res.type('text/css').send(css)
+    } else {
+      if (ct) res.setHeader('Content-Type', ct)
+      res.send(r.rawBody)
     }
-  })
+  } catch {
+    res.status(502).send('Bad gateway')
+  }
+})
 
   return app
 }
+
