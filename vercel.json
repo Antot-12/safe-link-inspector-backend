@@ -1,12 +1,7 @@
 {
   "version": 2,
-  "functions": {
-    "api/**/*.mjs": { "runtime": "nodejs22.x" },
-    "api/**/*.js":  { "runtime": "nodejs22.x" }
-  },
   "routes": [
-    { "src": "/api/(live|asset)(?:/.*)?", "headers": { "X-Frame-Options": "" } },
-    { "src": "/api/sanitized/.*",        "headers": { "X-Frame-Options": "" } },
-    { "src": "/api/(.*)", "dest": "/api/$1" }
+    { "src": "/api/(.*)", "dest": "api/index.mjs" }
   ]
 }
+
