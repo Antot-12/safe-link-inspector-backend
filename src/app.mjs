@@ -14,16 +14,7 @@ import { vtCheck } from "./analyzer/vt.js"
 import { sanitizeHtml } from "./analyzer/sanitize.js"
 import { getTlsProfile } from "./analyzer/tls.js"
 import { getWhoisAge } from "./analyzer/whois.js"
-import {
-  safeBrowsingCheck,
-  phishTankCheck,
-  urlscanCheck,
-  urlhausCheck,
-  threatFoxCheck,
-  openPhishCheck,
-  spamhausDblCheck,
-  summarizeReputation
-} from "./analyzer/reputation.js"
+import { safeBrowsingCheck, phishTankCheck, urlscanCheck } from "./analyzer/reputation.js"
 import { getIpInfo } from "./analyzer/netinfo.js"
 import { analyzeForms } from "./analyzer/forms.js"
 import { securityHeadersProfile, parseSetCookie } from "./analyzer/headers.js"
@@ -56,6 +47,12 @@ function isHttpUrl(u){
   }catch{ return false }
 }
 
+function parseUrlParam(req){
+  const q = req.query?.url
+  const s = Array.isArray(q) ? q[0] : q
+  return typeof s === "string" ? s.trim() : ""
+}
+
 function stripMetaCsp(html){
   return html.replace(/<meta[^>]+http-equiv=["']content-security-policy["'][^>]*>/ig, "")
 }
@@ -82,7 +79,7 @@ function rewriteAttrs(html, baseHref){
     let abs
     try { abs = new URL(u, baseHref).href } catch { abs = u }
     if (!isHttpUrl(abs)) return `${attr}=${q}${u}${q2}`
-    return `${attr}=${q}/api/asset?url=${encodeURIComponent(abs)}${q2}`
+    return `${attr}=${q}/asset?url=${encodeURIComponent(abs)}${q2}`
   })
 }
 
@@ -91,7 +88,7 @@ function rewriteCssUrls(css, baseHref){
     let abs
     try { abs = new URL(u, baseHref).href } catch { abs = u }
     if (!isHttpUrl(abs)) return `url(${u})`
-    return `url(/api/asset?url=${encodeURIComponent(abs)})`
+    return `url(/asset?url=${encodeURIComponent(abs)})`
   })
 }
 
@@ -261,21 +258,12 @@ export async function createApp(){
 
     const heur = computeHeuristics(finalUrl)
     const base = riskScore(finalUrl)
-    const score = Math.max(0, Math.min(100, base + heur.scoreDelta))
+    const score = base + heur.scoreDelta
     const label = riskLabel(score)
 
-    const [vt, tls, whois, ipinfo, gsb, pt, urlscan, urlhaus, tfox, openphish, dbl] = await Promise.all([
-      vtCheck(finalUrl),
-      getTlsProfile(finalUrl),
-      getWhoisAge(finalUrl),
-      getIpInfo(finalUrl),
-      safeBrowsingCheck(finalUrl),
-      phishTankCheck(finalUrl),
-      urlscanCheck(finalUrl),
-      urlhausCheck(finalUrl),
-      threatFoxCheck(new URL(finalUrl).hostname),
-      openPhishCheck(finalUrl),
-      spamhausDblCheck(new URL(finalUrl).hostname)
+    const [vt, tls, whois, ipinfo, gsb, pt, urlscan] = await Promise.all([
+      vtCheck(finalUrl), getTlsProfile(finalUrl), getWhoisAge(finalUrl),
+      getIpInfo(finalUrl), safeBrowsingCheck(finalUrl), phishTankCheck(finalUrl), urlscanCheck(finalUrl)
     ])
 
     let title = "", description = "", contentType = "", sanitizedPath = "", formFindings = [], headersProfile = null, cookies = []
@@ -322,37 +310,15 @@ export async function createApp(){
     }
 
     const shareToken = nanoid(8)
-    const repSummary = summarizeReputation({
-      gsb,
-      phishTank: pt,
-      urlscan,
-      urlhaus,
-      threatFox: tfox,
-      openPhish: openphish,
-      spamhaus: dbl
-    })
 
     const record = {
-      id,
-      shareToken,
-      startedAt,
-      inputUrl: normalized,
-      finalUrl,
-      chain,
-      isShortened,
-      risk: { score, label },
-      heuristics: heur,
-      vt,
-      tls,
-      tlsWarnings,
-      whois,
-      net: ipinfo,
+      id, shareToken, startedAt,
+      inputUrl: normalized, finalUrl, chain, isShortened,
+      risk: { score, label }, heuristics: heur,
+      vt, tls, tlsWarnings, whois, net: ipinfo,
       security: { hsts, httpToHttps, headers: headersProfile, cookies },
-      reputation: { gsb, phishTank: pt, urlscan, urlhaus, threatFox: tfox, openPhish: openphish, spamhaus: dbl, summary: repSummary },
-      contentType,
-      title,
-      description,
-      formFindings,
+      reputation: { gsb, phishTank: pt, urlscan },
+      contentType, title, description, formFindings,
       sanitized: sanitizedPath ? `/api/sanitized/${id}` : ""
     }
 
@@ -372,7 +338,7 @@ export async function createApp(){
         "font-src https: data:",
         "base-uri 'none'",
         "form-action 'none'",
-        `frame-ancestors ${allowedFramersHeader()}`
+        "frame-ancestors 'self'"
       ].join("; "))
       res.setHeader("X-Content-Type-Options","nosniff")
       res.setHeader("Cross-Origin-Resource-Policy","same-site")
@@ -384,53 +350,54 @@ export async function createApp(){
   })
 
   app.get(['/live', '/api/live'], async (req, res) => {
-    const raw = req.query.url
-    if (!raw) return res.status(400).send('url is required')
-    try {
-      const r = await fetchUpstream(raw)
-      const ct = r.headers['content-type'] || 'text/html; charset=utf-8'
-      res.setHeader('Content-Security-Policy', `default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; object-src 'none'; frame-ancestors ${allowedFramersHeader()}`)
-      res.setHeader('Referrer-Policy','no-referrer')
-      res.setHeader('Permissions-Policy','geolocation=(), microphone=(), camera=(), payment=()')
-      res.setHeader('X-Content-Type-Options','nosniff')
-      res.setHeader('Cache-Control','no-store')
-      if (/text\/html/i.test(ct)) {
-        let html = r.body.toString()
-        html = stripMetaCsp(html)
-        html = insertBase(html, raw)
-        html = neutralizeFrameBusters(html)
-        html = rewriteAttrs(html, raw)
-        html = ensureStyles(html)
-        res.type('html').send(html)
-      } else {
-        res.setHeader('Content-Type', ct)
-        res.send(r.rawBody)
-      }
-    } catch {
-      res.status(502).send('Bad gateway')
+  const raw = req.query.url
+  if (!raw) return res.status(400).send('url is required')
+  try {
+    const r = await fetchUpstream(raw)
+    const ct = r.headers['content-type'] || 'text/html; charset=utf-8'
+    res.setHeader('Content-Security-Policy', `default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; object-src 'none'; frame-ancestors ${allowedFramers()}`)
+    res.setHeader('Referrer-Policy','no-referrer')
+    res.setHeader('Permissions-Policy','geolocation=(), microphone=(), camera=(), payment=()')
+    res.setHeader('X-Content-Type-Options','nosniff')
+    res.setHeader('Cache-Control','no-store')
+    if (/text\/html/i.test(ct)) {
+      let html = r.body.toString()
+      html = stripMetaCsp(html)
+      html = insertBase(html, raw)
+      html = neutralizeFrameBusters(html)
+      html = rewriteAttrs(html, raw)
+      html = ensureStyles(html)
+      res.type('html').send(html)
+    } else {
+      res.setHeader('Content-Type', ct)
+      res.send(r.rawBody)
     }
-  })
+  } catch {
+    res.status(502).send('Bad gateway')
+  }
+})
 
-  app.get(['/asset', '/api/asset'], async (req, res) => {
-    const raw = req.query.url
-    if (!raw) return res.status(400).send('url is required')
-    try {
-      const origin = new URL(raw)
-      const r = await fetchUpstream(raw, { Referer: `${origin.origin}/` })
-      const ct = r.headers['content-type'] || ''
-      res.setHeader('Cache-Control','no-store')
-      if (/text\/css/i.test(ct)) {
-        let css = r.body.toString()
-        css = rewriteCssUrls(css, raw)
-        res.type('text/css').send(css)
-      } else {
-        if (ct) res.setHeader('Content-Type', ct)
-        res.send(r.rawBody)
-      }
-    } catch {
-      res.status(502).send('Bad gateway')
+app.get(['/asset', '/api/asset'], async (req, res) => {
+  const raw = req.query.url
+  if (!raw) return res.status(400).send('url is required')
+  try {
+    const origin = new URL(raw)
+    const r = await fetchUpstream(raw, { Referer: `${origin.origin}/` })
+    const ct = r.headers['content-type'] || ''
+    res.setHeader('Cache-Control','no-store')
+    if (/text\/css/i.test(ct)) {
+      let css = r.body.toString()
+      css = rewriteCssUrls(css, raw)
+      res.type('text/css').send(css)
+    } else {
+      if (ct) res.setHeader('Content-Type', ct)
+      res.send(r.rawBody)
     }
-  })
+  } catch {
+    res.status(502).send('Bad gateway')
+  }
+})
 
   return app
 }
+
